@@ -1,83 +1,161 @@
-# Serverless Warehouse Inventory & Reorder Microservice
+# Warehouse Inventory & Reorder Microservice
 
-Python · AWS Lambda · API Gateway · DynamoDB · SNS · pytest · moto
+A serverless API that keeps track of warehouse stock and **automatically sends an alert when an item needs to be reordered**.
 
-A serverless API that processes warehouse inventory transactions. Stock is
-decremented with atomic DynamoDB conditional updates, so two orders can never
-both take the same last unit. When stock falls to or below a dynamically
-calculated reorder point, an SNS alert is published.
+**Built with:** Python · AWS Lambda · API Gateway · DynamoDB · SNS · pytest · moto
 
-## Architecture
+---
+
+## What does it do?
+
+1. **Stores products and their stock** (for example, "Widget: 150 units").
+2. **Takes orders** and subtracts them from stock.
+3. **Never sells more than it has.** If two customers try to buy the last item at the same time, only one succeeds.
+4. **Sends a reorder alert** when stock gets too low, so the warehouse never runs out.
+5. **Sends only one alert** per low-stock event, not one for every order.
+
+---
+
+## How it works
 
 ```
-Client ──HTTP──> API Gateway ──> Lambda (inventory.handler)
-                                     │
-                                     ├── DynamoDB  (atomic UpdateItem with ConditionExpression)
-                                     └── SNS topic (REORDER_REQUIRED) ──> email / SQS / other Lambda
+Customer ──► API Gateway ──► Lambda ──► DynamoDB
+                               │
+                               └──► SNS ──► Email: "Reorder required!"
+                                    (only when stock is low)
 ```
 
-## Project layout
+| Part | What it does | Real-world example |
+|---|---|---|
+| **API Gateway** | Receives requests from the internet | Front desk |
+| **Lambda** | Runs the Python code | Clerk |
+| **DynamoDB** | Saves the stock numbers | Stock book |
+| **SNS** | Sends the low-stock alert | Manager's phone |
+
+---
+
+## Key features
+
+### 1. No over-selling (race condition fix)
+If 1 item is left and 2 people order it at the same moment, a simple program could approve both orders, which leaves stock at **-1**.
+
+This project asks DynamoDB to do one **atomic** (unbreakable) step:
+
+> "Subtract 1, **only if** at least 1 is left."
+
+The first order succeeds. The second gets an **"out of stock"** response.
+
+### 2. Smart reorder point
+Each product gets its own reorder level based on its sales:
+
+```
+Reorder point = (daily sales × delivery days) + safety stock
+Example:        (10 × 9) + 20 = 110
+```
+
+When stock drops to **110 or below**, an alert is sent.
+The **safety stock** is a small extra cushion in case sales are higher than usual.
+
+### 3. No duplicate alerts
+After the first alert, a `reorder_pending` flag is set, so later orders don't send more emails.
+When new stock arrives (a restock), the flag resets.
+
+---
+
+## API endpoints
+
+| Method | URL | What it does |
+|---|---|---|
+| `POST` | `/items` | Add a new product |
+| `GET` | `/items/{sku}` | See a product's stock |
+| `POST` | `/items/{sku}/reserve` | Place an order (removes stock) |
+| `POST` | `/items/{sku}/restock` | Add new stock |
+
+**Example order:**
+```json
+POST /items/WID-001/reserve
+{ "quantity": 25 }
+```
+
+**Response:**
+```json
+{ "quantity": 105, "reorder_point": 110, "reorder_triggered": true }
+```
+
+---
+
+## Project structure
 
 ```
 src/inventory/
-  handler.py       Lambda entry point: routing, validation, HTTP status codes
-  service.py       Orchestration: reserve -> check reorder point -> alert
-  repository.py    DynamoDB access (atomic updates)
-  safety_stock.py  Pure math: safety stock + reorder point
-  notifier.py      SNS publishing
-  config.py        Environment variables
+  handler.py        Receives requests and checks the input
+  service.py        Runs the main steps in order
+  repository.py     Talks to DynamoDB (atomic updates)
+  safety_stock.py   Calculates the reorder point
+  notifier.py       Sends the SNS alert
 tests/
-  unit/            No AWS at all (pure logic + handler validation)
-  integration/     Full flow against moto's in-memory DynamoDB/SNS/SQS
-template.yaml      AWS SAM infrastructure-as-code
-events/            Sample API Gateway events for `sam local invoke`
+  unit/             Tests the logic on its own
+  integration/      Tests the full flow with a fake AWS
+template.yaml       AWS setup (infrastructure as code)
 ```
 
-## API
+---
 
-| Method | Path                    | Body                    | Result                                   |
-|--------|-------------------------|-------------------------|------------------------------------------|
-| POST   | `/items`                | item JSON               | 201 created, 409 if SKU exists           |
-| GET    | `/items/{sku}`          | none                    | 200 item + reorder point, 404 if missing |
-| POST   | `/items/{sku}/reserve`  | `{"quantity": n}`       | 200 decremented, 409 insufficient stock  |
-| POST   | `/items/{sku}/restock`  | `{"quantity": n}`       | 200 incremented, reorder flag cleared    |
+## Testing
 
-Item fields: `sku`, `name`, `quantity` (required), plus `avg_daily_demand`,
-`demand_std_dev`, `lead_time_days`, `reorder_qty`.
+The project has **29 automated tests**.
+They use **moto**, a library that runs a **fake AWS on your computer**, so no AWS account is needed.
 
-## Dynamic safety stock
+The tests check that:
+- Orders reduce stock correctly
+- You can't order more than what's available
+- Two customers can't buy the same last item
+- An alert is sent when stock gets low
+- Only **one** alert is sent, not many
+- Bad input (like a negative quantity) is rejected
 
-```
-safety_stock  = ceil(z * demand_std_dev * sqrt(lead_time_days))     z = 1.65 (95% service level)
-reorder_point = ceil(avg_daily_demand * lead_time_days) + safety_stock
-```
+---
 
-Example: 10/day demand, std dev 4, 9-day lead time gives 90 + 20 = **110**.
+## Run it on your computer
 
-## Run the tests locally
+You need **Python 3.11 or newer**.
 
 ```bash
+# 1. Create a virtual environment
 python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+
+# 2. Activate it
+.venv\Scripts\activate          # Windows
+source .venv/bin/activate       # Mac / Linux
+
+# 3. Install the libraries
 pip install -r requirements-dev.txt
+
+# 4. Run the tests
 pytest -v
 ```
 
-## Deploy to AWS
+Expected result: **`29 passed`**
 
-Needs the AWS CLI (configured with `aws configure`) and the AWS SAM CLI.
+---
+
+## Deploy to AWS (optional)
+
+The project includes an **AWS SAM** template, so it can be deployed with two commands
+(needs an AWS account plus the AWS CLI and SAM CLI installed):
 
 ```bash
 sam build
-sam deploy --guided                # set AlertEmail to receive alerts
+sam deploy --guided
 ```
 
-Then try it (replace `$API` with the ApiUrl output):
+---
 
-```bash
-curl -X POST $API/items -d '{"sku":"WID-001","name":"Widget","quantity":150,"avg_daily_demand":10,"demand_std_dev":4,"lead_time_days":9,"reorder_qty":300}'
-curl -X POST $API/items/WID-001/reserve -d '{"quantity":45}'
-curl $API/items/WID-001
-```
+## What I learned
 
-Remove everything with `sam delete`.
+- Building a **serverless** API with AWS Lambda and API Gateway
+- Using **DynamoDB conditional updates** to prevent race conditions
+- Sending notifications with **AWS SNS**
+- Calculating **safety stock** and **reorder points**
+- Testing AWS code **offline** with pytest and moto
+- Writing **infrastructure as code** with AWS SAM
