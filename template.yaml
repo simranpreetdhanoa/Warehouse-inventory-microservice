@@ -1,0 +1,80 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Serverless warehouse inventory & reorder microservice
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: Optional email address subscribed to reorder alerts
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 10
+    MemorySize: 256
+    Environment:
+      Variables:
+        INVENTORY_TABLE: !Ref InventoryTable
+        REORDER_TOPIC_ARN: !Ref ReorderTopic
+
+Resources:
+  InventoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: sku
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sku
+          KeyType: HASH
+
+  ReorderTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: Inventory reorder alerts
+
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref ReorderTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  InventoryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: inventory.handler.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref InventoryTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt ReorderTopic.TopicName
+      Events:
+        CreateItem:
+          Type: Api
+          Properties: { Path: /items, Method: post }
+        GetItem:
+          Type: Api
+          Properties: { Path: '/items/{sku}', Method: get }
+        Reserve:
+          Type: Api
+          Properties: { Path: '/items/{sku}/reserve', Method: post }
+        Restock:
+          Type: Api
+          Properties: { Path: '/items/{sku}/restock', Method: post }
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the inventory API
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+  TableName:
+    Value: !Ref InventoryTable
+  TopicArn:
+    Value: !Ref ReorderTopic

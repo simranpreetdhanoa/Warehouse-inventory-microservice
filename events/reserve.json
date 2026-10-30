@@ -1,0 +1,2 @@
+{"httpMethod": "POST", "resource": "/items/{sku}/reserve", "pathParameters": {"sku": "WID-001"},
+ "body": "{\"quantity\": 45}"}

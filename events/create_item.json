@@ -1,0 +1,2 @@
+{"httpMethod": "POST", "resource": "/items", "pathParameters": null,
+ "body": "{\"sku\": \"WID-001\", \"name\": \"Widget\", \"quantity\": 150, \"avg_daily_demand\": 10, \"demand_std_dev\": 4, \"lead_time_days\": 9, \"reorder_qty\": 300}"}
